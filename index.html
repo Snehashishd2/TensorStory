@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A tensor's life on one GPU</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --void:#06080C; --ink:#0A0D12; --panel:#10141B; --line:#222B36; --line2:#33404E;
+    --txt:#DCE2EA; --dim:#8893A2; --faint:#586271;
+    --hcol:#F0834A; --scol:#6FA8C7; --bcol:#A88FE0;
+    --cool:#46B8CC; --cool2:#7E8BF0; --warm:#F0834A; --amber:#F2B24C; --danger:#EA5A53;
+    --pink:#E87FAE; --green:#5FBF8A; --purple:#B9A7F0;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto;}}
+  body{background:var(--void);color:var(--txt);font-family:'Inter',system-ui,sans-serif;line-height:1.7;-webkit-font-smoothing:antialiased;overflow-x:hidden;}
+  h1,h2{font-family:'Space Grotesk',sans-serif;font-weight:500;letter-spacing:-0.01em;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  .eyebrow{font-family:'JetBrains Mono',monospace;font-size:11.5px;letter-spacing:0.22em;text-transform:uppercase;color:var(--warm);}
+
+  .hero{padding:70px 26px 22px;max-width:1140px;margin:0 auto;}
+  .hero .eyebrow{margin-bottom:16px;}
+  .hero h1{font-size:clamp(2rem,5.4vw,3.5rem);line-height:1.04;font-weight:600;max-width:19ch;margin-bottom:16px;}
+  .hero h1 em{font-style:normal;color:var(--warm);}
+  .hero p{color:var(--dim);font-size:clamp(1rem,2.2vw,1.13rem);max-width:62ch;}
+  .cue{margin-top:24px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--faint);letter-spacing:0.08em;}
+
+  .scrolly{max-width:1140px;margin:0 auto;padding:0 26px;display:grid;grid-template-columns:1.08fr 0.92fr;gap:50px;align-items:start;}
+  .graphic{position:sticky;top:4vh;align-self:start;height:92vh;display:flex;flex-direction:column;}
+  .panel{position:relative;border:1px solid var(--line);border-radius:14px;background:radial-gradient(130% 120% at 50% 12%,#0D1118 0%,#06080C 70%);display:flex;flex-direction:column;overflow:hidden;height:100%;box-shadow:0 24px 60px -30px rgba(0,0,0,0.9);}
+  .ctlbar{display:flex;flex-wrap:wrap;gap:9px 14px;align-items:center;padding:10px 13px;border-bottom:1px solid var(--line);background:rgba(255,255,255,0.015);z-index:3;}
+  .ctl{display:flex;align-items:center;gap:7px;}
+  .ctl label{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);}
+  .ctl input[type=range]{-webkit-appearance:none;appearance:none;width:64px;height:3px;background:var(--line2);border-radius:3px;outline:none;}
+  .ctl input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--warm);cursor:pointer;border:2px solid var(--void);box-shadow:0 0 10px -1px var(--warm);}
+  .ctl input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--warm);cursor:pointer;border:2px solid var(--void);}
+  .ctl .val{font-family:'JetBrains Mono',monospace;font-size:12px;min-width:36px;text-align:right;}
+  .ctlbar select{background:var(--panel);color:var(--txt);border:1px solid var(--line2);border-radius:6px;padding:3px 6px;font-family:'JetBrains Mono',monospace;font-size:11px;}
+  .presets{display:flex;gap:6px;margin-left:auto;}
+  .presets button{background:rgba(240,131,74,0.08);color:var(--warm);border:1px solid rgba(240,131,74,0.4);border-radius:7px;padding:4px 9px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer;transition:background .18s;}
+  .presets button:hover{background:rgba(240,131,74,0.18);}
+  .presets button.on{background:var(--warm);color:#0A0D12;}
+
+  .canvas-host{position:relative;flex:1;min-height:0;}
+  #scene{display:block;width:100%;height:100%;touch-action:pan-y;cursor:grab;}
+  #scene.hide{display:none;}
+  #scene:active{cursor:grabbing;}
+  .modetag{position:absolute;left:15px;top:13px;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.13em;text-transform:uppercase;color:var(--warm);text-shadow:0 0 14px rgba(240,131,74,0.5);pointer-events:none;z-index:2;}
+  .hint{position:absolute;right:14px;top:13px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--faint);pointer-events:none;}
+  .zoomctl{position:absolute;right:14px;bottom:14px;display:flex;flex-direction:column;gap:6px;z-index:2;}
+  .zoomctl.hide{display:none;}
+  .zoomctl button{width:30px;height:30px;border-radius:8px;border:1px solid var(--line2);background:rgba(16,20,27,0.7);color:var(--txt);font-family:'JetBrains Mono',monospace;font-size:16px;cursor:pointer;line-height:1;}
+  .zoomctl button:hover{border-color:var(--warm);}
+
+  .overlay{position:absolute;top:0;right:0;bottom:0;left:0;display:none;flex-direction:column;padding:12px;gap:7px;}
+  .overlay.show{display:flex;}
+
+  .tm-total{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--txt);display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
+  .tm-total .bad{color:var(--danger);} .tm-total .ok{color:var(--cool);}
+  .seg2{display:inline-flex;border:1px solid var(--line2);border-radius:7px;overflow:hidden;}
+  .seg2 button{background:transparent;color:var(--dim);border:none;padding:3px 9px;font-family:'JetBrains Mono',monospace;font-size:10.5px;cursor:pointer;}
+  .seg2 button.on{background:var(--warm);color:#0A0D12;}
+  .tm-fill{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;gap:5px;}
+  .tm-stack{display:none;}
+  .tm-region{display:flex;flex-direction:column;border:1px solid var(--line2);border-radius:8px;overflow:hidden;min-height:0;}
+  .tm-region.oom{border-color:var(--danger);}
+  .tm-rhead{font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;color:var(--dim);background:rgba(255,255,255,0.03);border-bottom:1px solid var(--line);}
+  .tm-rhead b{color:var(--txt);font-weight:500;}
+  .tm-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(28px,1fr));gap:3px;padding:5px;min-height:0;}
+  .tm-layer{display:flex;flex-direction:column;border-radius:4px;overflow:hidden;border:1px solid rgba(255,255,255,0.06);min-height:14px;}
+  .tm-att{background:rgba(126,139,240,0.5);flex:1;} .tm-ff{background:rgba(70,184,204,0.5);flex:1.6;}
+  .tm-body{flex:1;display:flex;gap:5px;padding:5px;min-height:0;}
+  .tm-col{display:flex;flex-direction:column;gap:5px;min-width:0;}
+  .tm-tile{border-radius:5px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#08110D;padding:3px;text-align:center;overflow:hidden;}
+  .tm-tile small{font-size:9px;opacity:0.85;}
+  .tm-params{background:var(--warm);} .tm-grads{background:#CE7440;} .tm-optim{background:var(--cool);} .tm-master{background:var(--cool2);}
+  .tm-capline{position:absolute;left:-4px;right:-4px;height:0;border-top:2px dashed var(--danger);}
+  .tm-caplbl{position:absolute;right:0;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--danger);transform:translateY(-14px);}
+
+  .pp-total{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--txt);}
+  .pp-total b{color:var(--warm);} .pp-total .chk{color:var(--cool);}
+  .pp-rows{flex:1;overflow:auto;border:1px solid var(--line2);border-radius:9px;padding:8px 10px;font-family:'JetBrains Mono',monospace;font-size:11px;min-height:0;}
+  .pp-row{display:grid;grid-template-columns:1fr 1.25fr auto;gap:8px;padding:2.5px 0;border-bottom:1px dashed rgba(255,255,255,0.05);align-items:baseline;}
+  .pp-row .nm{color:var(--txt);} .pp-row .fm{color:var(--dim);} .pp-row .vl{color:var(--warm);text-align:right;}
+  .pp-row.sub .nm{color:var(--faint);} .pp-row.sub{color:var(--faint);}
+  .pp-row.tot{margin-top:3px;border-top:1px solid var(--line2);padding-top:5px;}
+  .pp-row.tot .nm{color:var(--txt);font-weight:500;} .pp-row.tot .vl{color:var(--cool);}
+  .glossary{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--faint);line-height:1.6;}
+  .glossary b{color:var(--dim);font-weight:500;}
+  .pp-comp{display:flex;height:14px;border-radius:5px;overflow:hidden;border:1px solid var(--line2);}
+  .pp-leg{display:flex;flex-wrap:wrap;gap:7px 12px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--dim);}
+  .pp-leg span{display:flex;align-items:center;gap:4px;} .pp-leg .d{width:9px;height:9px;border-radius:2px;}
+
+  /* activation anatomy */
+  .ac-body{flex:1;overflow:auto;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);min-height:0;display:flex;flex-direction:column;gap:9px;}
+  .ac-card{border:1px solid var(--line2);border-radius:9px;padding:8px 10px;}
+  .ac-card .h{color:var(--txt);font-size:11px;margin-bottom:5px;}
+  .ac-card .h b{color:var(--warm);}
+  .ac-chain{display:flex;align-items:center;gap:4px;flex-wrap:wrap;color:var(--dim);font-size:10.5px;margin-bottom:5px;}
+  .ac-chain .t{background:rgba(126,139,240,0.18);border:1px solid var(--cool2);border-radius:4px;padding:2px 6px;color:var(--txt);}
+  .ac-chain .op{color:var(--faint);}
+  .ac-row{display:flex;justify-content:space-between;gap:8px;padding:1.5px 0;}
+  .ac-row .vl{color:var(--warm);}
+  .ac-sum{color:var(--txt);} .ac-sum b{color:var(--cool);}
+  .ac-twobar{display:flex;height:16px;border-radius:5px;overflow:hidden;border:1px solid var(--line2);margin-top:4px;}
+  .ac-lin{background:var(--cool);} .ac-quad{background:var(--warm);}
+  .ac-note{color:var(--faint);font-size:10px;}
+  .ac-mat{display:grid;grid-template-columns:repeat(7,1fr);gap:1px;width:64px;height:64px;}
+  .ac-mat div{background:rgba(240,131,74,0.35);border-radius:1px;}
+
+  /* acts 09-12 */
+  .pf-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);}
+  .pf-head .pk b{color:var(--txt);} .pf-head .bad{color:var(--danger);} .pf-head .ok{color:var(--cool);}
+  .pf-leg{display:flex;gap:10px;flex-wrap:wrap;} .pf-leg span{display:flex;align-items:center;gap:4px;} .pf-leg .d{width:9px;height:9px;border-radius:2px;display:inline-block;}
+  .pf-wrap{flex:1;min-height:0;display:flex;} .pf-wrap svg{width:100%;height:100%;}
+  .pf-cap{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);min-height:36px;line-height:1.5;} .pf-cap b{color:var(--txt);font-weight:500;}
+  .rc-bar{display:flex;align-items:center;gap:8px;margin:3.5px 0;}
+  .rc-bar .lbl{width:76px;font-size:10px;color:var(--dim);flex:none;}
+  .rc-bar .tr{flex:1;height:13px;border:1px solid var(--line2);border-radius:4px;overflow:hidden;background:rgba(255,255,255,0.02);}
+  .rc-bar .fl{height:100%;transition:width .35s ease;}
+  .rc-bar .gb{width:96px;text-align:right;color:var(--warm);font-size:10.5px;flex:none;}
+  .rc-bar.on .lbl{color:var(--txt);} .rc-bar.on .tr{border-color:var(--warm);}
+  .fl-seg{display:flex;height:15px;border-radius:4px;overflow:hidden;border:1px solid var(--line2);margin-top:4px;}
+  .fl-seg div{transition:width .35s ease;}
+  .tr-wrap{flex:1;min-height:0;display:flex;} .tr-wrap svg{width:100%;height:100%;}
+
+  .flow-wrap{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;}
+  .flow-wrap svg{width:100%;height:100%;max-height:100%;}
+  .flow-cap{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);line-height:1.5;min-height:32px;}
+  .flow-cap b{color:var(--txt);font-weight:500;}
+
+  .readout{border-top:1px solid var(--line);background:rgba(5,7,11,0.86);padding:12px 16px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;color:var(--dim);min-height:80px;}
+  .readout .ln{white-space:pre-wrap;}
+  .readout b{color:var(--txt);font-weight:500;}
+  .readout .ok{color:var(--cool);} .readout .bad{color:var(--danger);} .readout .acc{color:var(--warm);} .readout .c2{color:var(--cool2);}
+
+  .steps{padding:32vh 0 32vh;}
+  .step{min-height:74vh;display:flex;flex-direction:column;justify-content:center;opacity:0.3;transform:translateY(18px);transition:opacity .6s cubic-bezier(.22,1,.36,1),transform .6s cubic-bezier(.22,1,.36,1);}
+  .step.active{opacity:1;transform:none;}
+  .step .eyebrow{margin-bottom:10px;}
+  .step h2{font-size:clamp(1.35rem,2.9vw,1.9rem);font-weight:500;margin-bottom:13px;max-width:21ch;}
+  .step p{color:var(--dim);max-width:46ch;margin-bottom:12px;}
+  .step.active p{color:#AEB6C2;}
+  .step p strong{color:var(--txt);font-weight:500;}
+  .step p .hl{color:var(--warm);font-weight:500;} .step p .cl{color:var(--cool);font-weight:500;}
+  .step .knob{display:inline-flex;align-items:center;gap:9px;margin-top:6px;padding:7px 11px;border:1px solid var(--line2);border-radius:9px;background:rgba(16,20,27,0.5);}
+  .step .knob label{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--dim);}
+  .step .knob select{background:var(--panel);color:var(--txt);border:1px solid var(--line2);border-radius:6px;padding:3px 8px;font-family:'JetBrains Mono',monospace;font-size:12px;}
+
+  .closing{border-top:1px solid var(--line);margin-top:8px;}
+  .closing-inner{max-width:1140px;margin:0 auto;padding:66px 26px 26px;}
+  .closing h2{font-size:clamp(1.4rem,3vw,1.95rem);font-weight:500;max-width:26ch;margin-bottom:14px;}
+  .closing-inner > p{color:var(--dim);max-width:62ch;margin-bottom:20px;}
+  .pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;}
+  .pcard{border:1px solid var(--line);border-radius:11px;padding:17px;background:linear-gradient(180deg,#10141B,#0A0D12);transition:transform .2s,border-color .2s;}
+  .pcard:hover{transform:translateY(-3px);border-color:var(--line2);}
+  .pcard .tag{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--warm);}
+  .pcard h3{font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:15px;margin:7px 0;}
+  .pcard p{font-size:13px;color:var(--dim);line-height:1.55;}
+  footer a{color:var(--warm);text-decoration:none;border-bottom:1px solid rgba(240,131,74,0.35);}
+  footer a:hover{border-bottom-color:var(--warm);}
+  footer{padding:34px 26px 72px;max-width:1140px;margin:0 auto;color:var(--faint);font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.75;}
+
+  /* ---- signature motion & texture ---- */
+  @keyframes rise{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:none;}}
+  .hero .eyebrow,.hero h1,.hero p,.cue,.byline{animation:rise .7s cubic-bezier(.22,1,.36,1) both;}
+  .hero h1{animation-delay:.07s;}.hero p{animation-delay:.15s;}.cue{animation-delay:.23s;}.byline{animation-delay:.31s;}
+  .byline{margin-top:13px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--faint);letter-spacing:0.03em;}
+  .byline a{color:var(--warm);text-decoration:none;border-bottom:1px solid rgba(240,131,74,0.35);}
+  .byline a:hover{border-bottom-color:var(--warm);}
+  #progress{position:fixed;top:0;left:0;height:2px;width:0;background:linear-gradient(90deg,var(--warm),var(--cool2));z-index:50;box-shadow:0 0 9px rgba(240,131,74,0.55);}
+  .acttag{position:absolute;left:15px;bottom:12px;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;color:var(--faint);pointer-events:none;z-index:2;}
+  .grain{position:fixed;inset:0;pointer-events:none;z-index:60;opacity:0.05;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");}
+  @keyframes tilein{from{opacity:0;transform:scale(.9);}to{opacity:1;transform:none;}}
+  .tm-anim .tm-layer{animation:tilein .45s cubic-bezier(.22,1,.36,1) both;}
+  .tm-anim .tm-tile{animation:tilein .55s cubic-bezier(.22,1,.36,1) .08s both;}
+  @media (prefers-reduced-motion:reduce){
+    .hero .eyebrow,.hero h1,.hero p,.cue,.byline{animation:none;}
+    .step{transform:none;transition:opacity .3s ease;}
+    .tm-anim .tm-layer,.tm-anim .tm-tile{animation:none;}
+    #progress{box-shadow:none;}
+  }
+
+  @media (pointer:coarse){
+    .ctl input[type=range]{width:84px;height:5px;}
+    .ctl input[type=range]::-webkit-slider-thumb{width:19px;height:19px;}
+    .ctl input[type=range]::-moz-range-thumb{width:19px;height:19px;}
+    .zoomctl button{width:38px;height:38px;font-size:18px;}
+    .presets button{padding:7px 11px;}
+    .ctlbar select{padding:6px 8px;}
+    .seg2 button{padding:6px 11px;}
+  }
+
+  @media (max-width:820px){
+    .scrolly{grid-template-columns:1fr;gap:0;padding:0 12px;}
+    /* dvh tracks the real visible height as iOS/Android toolbars collapse */
+    .graphic{position:sticky;top:0;height:56vh;height:56dvh;z-index:5;padding-top:6px;background:var(--void);}
+    .panel{border-radius:11px;}
+    /* control bar: one row, swipe sideways, instead of wrapping into 3 rows */
+    .ctlbar{flex-wrap:nowrap;overflow-x:auto;gap:7px 10px;padding:8px 10px;
+      scrollbar-width:none;-webkit-overflow-scrolling:touch;}
+    .ctlbar::-webkit-scrollbar{display:none;}
+    .ctl{flex:none;} .presets{flex:none;margin-left:0;}
+    .ctl .val{min-width:30px;}
+    .hint{display:none;}
+    .modetag{font-size:10px;left:11px;top:10px;}
+    .readout{padding:9px 12px;font-size:11px;min-height:0;max-height:21vh;max-height:21dvh;overflow:auto;}
+    .steps{padding:6vh 0 30vh;}
+    .step{min-height:52vh;min-height:52dvh;justify-content:flex-start;padding-top:4vh;}
+    .step p{font-size:14px;}
+    .hero{padding:13vh 18px 9vh;}
+    footer{padding:30px 18px 60px;}
+  }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div class="grain"></div>
+
+<div class="hero">
+  <div class="eyebrow">a tensor's life on one gpu</div>
+  <h1>Orbit a <em>batch</em> — then watch it run out of room</h1>
+  <p>One activation tensor, floating in the dark. Lift a token out, normalize it, cut it into heads, count every parameter, see where activations come from, watch the full memory bill as a treemap, and find out why one GPU isn't enough. Then profile four real training steps, buy room back with recomputation and gradient accumulation, and read the kernel trace that opens the door to many GPUs. Presets reproduce the real GPT-2 and Llama-3 numbers.</p>
+  <div class="cue">&#8595; scroll &middot; drag to orbit &middot; wheel / pinch to zoom</div>
+  <div class="byline">built by <a href="https://www.linkedin.com/in/snehashish-debnath/" target="_blank" rel="noopener">Snehashish Debnath</a> &middot; one HTML file &middot; three.js &middot; numbers from the Ultra-Scale Playbook</div>
+</div>
+
+<div class="scrolly">
+  <div class="graphic">
+    <div class="panel">
+      <div class="ctlbar">
+        <div class="ctl"><label>B</label><input type="range" id="B" min="1" max="64" value="8" step="1"><span class="val" id="B-v">8</span></div>
+        <div class="ctl"><label>S</label><input type="range" id="S" min="512" max="8192" value="1024" step="512"><span class="val" id="S-v">1024</span></div>
+        <div class="ctl"><label>h</label><input type="range" id="h" min="256" max="8192" value="768" step="256"><span class="val" id="h-v">768</span></div>
+        <div class="ctl"><label>L</label><input type="range" id="L" min="1" max="80" value="12" step="1"><span class="val" id="L-v">12</span></div>
+        <select id="gpu"><option value="40">A100 40G</option><option value="80" selected>H100 80G</option><option value="141">H200 141G</option></select>
+        <div class="presets"><button id="p-gpt2">GPT-2 124M</button><button id="p-llama">Llama-3 8B</button></div>
+      </div>
+      <div class="canvas-host">
+        <canvas id="scene"></canvas>
+        <div class="modetag" id="modetag">the tensor</div>
+        <div class="hint" id="hint">drag &middot; zoom</div>
+        <div class="acttag" id="acttag">act 01 / 12</div>
+        <div class="zoomctl" id="zoomctl"><button id="zin">+</button><button id="zout">&minus;</button></div>
+        <div class="overlay" id="ov-params"></div>
+        <div class="overlay" id="ov-act"></div>
+        <div class="overlay" id="ov-budget"></div>
+        <div class="overlay" id="ov-step"><div class="flow-wrap" id="flow-wrap"></div><div class="flow-cap" id="flow-cap"></div></div>
+        <div class="overlay" id="ov-profile"></div>
+        <div class="overlay" id="ov-recomp"></div>
+        <div class="overlay" id="ov-accum"></div>
+        <div class="overlay" id="ov-trace"></div>
+      </div>
+      <div class="readout"><div class="ln" id="calc"></div></div>
+    </div>
+  </div>
+
+  <div class="steps">
+    <div class="step" data-mode="tensor"><div class="eyebrow">act 01</div><h2>The activation tensor, axes labelled</h2>
+      <p>Each layer caches a box of activations — <span class="hl">H</span> hidden, <span class="cl">S</span> sequence, <span style="color:var(--bcol);font-weight:500;">B</span> batch. There are <strong>L</strong> boxes; only this one grows with B or S.</p></div>
+    <div class="step" data-mode="token"><div class="eyebrow">act 02 &mdash; one word</div><h2>Lift one token out</h2>
+      <p>Fix one sequence position in one batch element: <span class="hl">one token</span>, a vector along all of H.</p></div>
+    <div class="step" data-mode="layernorm"><div class="eyebrow">act 03 &mdash; along H</div><h2>LayerNorm normalizes this fiber, alone</h2>
+      <p>μ, σ over <span class="hl">all of this token's H values</span> — this token only, unlike BatchNorm. Scale + shift with γ, β (<strong>2h</strong> params).</p></div>
+    <div class="step" data-mode="heads"><div class="eyebrow">act 04 &mdash; after LN</div><h2>Project to Q, K, V — then slice into heads</h2>
+      <p>Projected to <span class="cl">Q, K, V</span> (h&rarr;h), each cut into <span class="hl">n_heads</span> chunks of <strong>d_head</strong>. Same cut on every token.</p>
+      <div class="knob"><label>n_heads</label><select id="nh"><option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option selected>12</option></select></div></div>
+    <div class="step" data-mode="params"><div class="eyebrow">act 05 &mdash; count every weight</div><h2>The parameter formula, element by element</h2>
+      <p>Each line is a real term with its symbols spelled out below: <span class="cl">embeddings</span>, per-layer <span class="hl">attention</span> and <span style="color:var(--amber);font-weight:500;">MLP</span>, norms, head. Hit a preset and the total lands on <strong>124M</strong> or <strong>8.03B</strong>.</p></div>
+    <div class="step" data-mode="activ"><div class="eyebrow">act 06 &mdash; what gets stored</div><h2>Where activations come from</h2>
+      <p>An activation is an intermediate value saved during the <span class="cl">forward</span> pass because the <span class="hl">backward</span> pass needs it to compute gradients. The FFN saves 3 tensors, attention saves more — and the attention score matrix is <strong>b·n_h·s²</strong>, which is why memory goes <span class="hl">quadratic in sequence length</span>.</p></div>
+    <div class="step" data-mode="budget"><div class="eyebrow">act 07 &mdash; the budget, by area</div><h2>Memory as a treemap — area is gigabytes</h2>
+      <p>Toggle precision and watch: <strong>fp32</strong> and <strong>mixed</strong> both cost 16 bytes/param of model state — mixed just rearranges it and adds a master copy. What mixed actually shrinks is the <span class="hl">activation</span> block (2-byte, not 4). The dashed line is your GPU; cross it and you OOM.</p></div>
+    <div class="step" data-mode="step"><div class="eyebrow">act 08 &mdash; why those sizes</div><h2>One training step explains the bill</h2>
+      <p><span style="color:var(--cool);font-weight:500;">Forward</span> caches activations; <span class="hl">backward</span> consumes them into <span style="color:var(--pink);font-weight:500;">gradients</span> (one per param = model size). The <span class="cl">optimizer</span> keeps momentum + variance, so it's biggest.</p></div>
+    <div class="step" data-mode="profile"><div class="eyebrow">act 09 &mdash; memory over time</div><h2>Four training steps, profiled</h2>
+      <p>Memory isn’t static. <span style="color:#B9A7F0;font-weight:500;">Activations</span> climb through the forward pass, then drain into <span style="color:var(--amber);font-weight:500;">gradients</span> as backward consumes them. Step 1 is the odd one: activations <strong>plateau</strong> while the caching allocator preps memory blocks, and <span style="color:var(--pink);font-weight:500;">optimizer states</span> only appear after the first optimizer call — which is why training can <span class="hl">succeed on step 1 and OOM on step 2</span>.</p></div>
+    <div class="step" data-mode="recomp"><div class="eyebrow">act 10 &mdash; trade compute for memory</div><h2>Activation recomputation</h2>
+      <p>Don’t store the activations from act 06 — keep one <span class="cl">checkpoint</span> per layer boundary and <span class="hl">replay the forward</span> inside the backward pass. <strong>Selective</strong> drops just the s&times;s score matrices (FlashAttention does this natively); <strong>full</strong> keeps ~2&middot;s&middot;b&middot;h bytes per layer for about <span class="hl">&times;1.33 compute</span>. Toggle it — the treemap above inherits your choice.</p></div>
+    <div class="step" data-mode="accum"><div class="eyebrow">act 11 &mdash; split the batch</div><h2>Gradient accumulation</h2>
+      <p>Slice the global batch into <span class="cl">micro-batches</span>: forward/backward each one, <strong>sum the gradients, divide by N</strong>, then take a single optimizer step. Mathematically identical to the big batch — but activation memory now tracks the <span class="hl">micro-batch</span>. The price: N sequential passes per step. No free lunch.</p></div>
+    <div class="step" data-mode="trace"><div class="eyebrow">act 12 &mdash; see the streams</div><h2>Profile compute and communication</h2>
+      <p>The PyTorch profiler shows the <strong>CPU launching kernels asynchronously</strong> while compute and communication run on separate <span class="cl">CUDA streams</span>. Run them sequentially and the GPU <span class="hl">idles</span>; overlap them and comm hides behind compute. Those micro-batches were independent — they could run <strong>in parallel</strong>. Time for more GPUs.</p></div>
+  </div>
+</div>
+
+<div class="closing">
+  <div class="closing-inner">
+    <div class="eyebrow" style="margin-bottom:10px;">the gateway</div>
+    <h2>Llama-3 8B can't even hold its model state on one GPU</h2>
+    <p>At 8.03B parameters, model state alone is ~128 GB (mixed-precision, 16 B/param) — past an 80 GB H100 before a single activation. Inference needs only weights + a KV cache; <em>training</em> needs all four blocks. That gap is why parallelism exists.</p>
+    <div class="pgrid">
+      <div class="pcard"><div class="tag">throughput, not memory</div><h3>Data parallel (DDP)</h3><p>Full model per GPU, batch split — a parallel version of gradient accumulation. Frees nothing.</p></div>
+      <div class="pcard"><div class="tag">model-state blocks</div><h3>ZeRO / FSDP</h3><p>Shards params, grads, optimizer states.</p></div>
+      <div class="pcard"><div class="tag">weights + activations</div><h3>Tensor parallel</h3><p>Splits matrices inside a layer, along the head axis.</p></div>
+      <div class="pcard"><div class="tag">the top region</div><h3>Context parallel</h3><p>Splits along S — tames the quadratic activation term.</p></div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  built as a learning artifact &middot; param counts reproduce GPT-2 small (124M) and Llama-3 8B (8.03B) &middot; memory follows the Ultra-Scale Playbook: model state 16 B/param (fp32 or mixed), Megatron activation estimate s·b·h·(34 + 5·n_h·s/h) &middot; fp32 activation scaling is approximate (≈2× mixed) &middot; acts 09&ndash;12 follow §2.1.1&ndash;2.3.1: first-step allocator plateau, optimizer states appear after step 1, full-recompute checkpoint ≈ 2·s·b·h bytes/layer with compute ×1.33, gbs = mbs × accumulation steps &middot; built by <a href="https://www.linkedin.com/in/snehashish-debnath/" target="_blank" rel="noopener">Snehashish Debnath</a>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id);};
+  var fmt=function(n){return Number(Math.round(n)).toLocaleString('en-US');};
+  var tmAnim=false,ppPrev=0;
+  function countTo(el,from,to,dur){if(!el)return;if(reduce||from===to){el.textContent=fmt(to);return;}
+    var t0=null;(function fr(t){if(t===undefined){requestAnimationFrame(fr);return;}if(!t0)t0=t;
+      var k=Math.min(1,(t-t0)/dur);k=1-Math.pow(1-k,3);el.textContent=fmt(from+(to-from)*k);
+      if(k<1)requestAnimationFrame(fr);})();}
+  function unit(n){n=Math.round(n);if(n>=1e9)return (n/1e9).toFixed(2)+'B';if(n>=1e6)return (n/1e6).toFixed(1)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return ''+n;}
+  var GB=function(b){return (b/1073741824).toFixed(1);};
+  var reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion:reduce)').matches;
+
+  var state={B:8,S:1024,h:768,L:12,gpu:80,nh:12,prec:'mixed',mode:'tensor',preset:'custom',recomp:'none',acc:1};
+  var cfg={v:50257,h:768,L:12,nH:12,dH:64,nKV:12,dff:3072,bias:true,glu:false,tied:true,posLearned:true,seqPos:1024,rms:false,name:'custom'};
+
+  function customCfg(){var h=state.h,nH=Math.max(1,Math.round(h/64));
+    cfg={v:50257,h:h,L:state.L,nH:nH,dH:64,nKV:nH,dff:4*h,bias:true,glu:false,tied:true,posLearned:true,seqPos:state.S,rms:false,name:'custom'};}
+  function paramBreak(){
+    var c=cfg,qDim=c.nH*c.dH,kvDim=c.nKV*c.dH;
+    var attn=2*c.h*qDim+2*c.h*kvDim+(c.bias?(qDim+2*kvDim+c.h):0);
+    var mlp=(c.glu?3:2)*c.h*c.dff+(c.bias?((c.glu?2:1)*c.dff+c.h):0);
+    var normP=c.rms?c.h:2*c.h,norms=2*normP;
+    var per=attn+mlp+norms,tokenE=c.v*c.h,posE=c.posLearned?c.seqPos*c.h:0,finalN=normP,head=c.tied?0:c.v*c.h;
+    return {tokenE:tokenE,posE:posE,attn:attn,mlp:mlp,norms:norms,per:per,finalN:finalN,head:head,total:tokenE+posE+c.L*per+finalN+head};
+  }
+  function modelBytes(){ // bytes per param by block, both sum to 16
+    if(state.prec==='fp32') return {p:4,g:4,o:8,master:0};
+    return {p:2,g:2,o:8,master:4};
+  }
+  function activLayerBytes(b){ // mixed-precision bytes/layer for batch b, honoring recomputation
+    var lin=34*state.S*b*state.h,quad=5*cfg.nH*state.S*state.S*b;
+    if(state.recomp==='full')return 2*state.S*b*state.h; // checkpoint tensor only
+    return lin+(state.recomp==='selective'?0:quad);
+  }
+  function flopsFwd(){ // per-layer forward FLOPs split (factor 2 per MAC)
+    var c=cfg,b=state.B,s=state.S,qDim=c.nH*c.dH,kvDim=c.nKV*c.dH;
+    var proj=2*b*s*(2*c.h*qDim+2*c.h*kvDim);
+    var score=4*b*s*s*qDim;
+    var mlp=2*b*s*(c.glu?3:2)*c.h*c.dff;
+    return {proj:proj,score:score,mlp:mlp,fwd:proj+score+mlp};
+  }
+  function recompOverhead(){
+    var f=flopsFwd();
+    if(state.recomp==='selective')return 1+f.score/(3*f.fwd);
+    if(state.recomp==='full')return 4/3;
+    return 1;
+  }
+  function memory(){
+    var N=paramBreak().total,bp=modelBytes();
+    var p=N*bp.p,g=N*bp.g,o=N*bp.o,master=N*bp.master;
+    var micro=Math.max(1,Math.round(state.B/state.acc));
+    var perLayerMixed=activLayerBytes(micro);
+    var aB=perLayerMixed*state.L*(state.prec==='fp32'?2:1);
+    return {N:N,p:p,g:g,o:o,master:master,ms:p+g+o+master,a:aB,perLayer:perLayerMixed,micro:micro,tot:p+g+o+master+aB,cap:state.gpu*1073741824,L:state.L};
+  }
+  function syncSliders(){
+    $('B').value=state.B;$('S').value=state.S;$('h').value=state.h;$('L').value=state.L;
+    $('B-v').textContent=state.B;$('S-v').textContent=state.S;$('h-v').textContent=state.h;$('L-v').textContent=state.L;
+    $('p-gpt2').classList.toggle('on',state.preset==='gpt2');$('p-llama').classList.toggle('on',state.preset==='llama');
+  }
+  function setPreset(name){
+    if(name==='gpt2'){cfg={v:50257,h:768,L:12,nH:12,dH:64,nKV:12,dff:3072,bias:true,glu:false,tied:true,posLearned:true,seqPos:1024,rms:false,name:'GPT-2 124M'};state.h=768;state.L=12;state.S=1024;state.B=8;}
+    else{cfg={v:128256,h:4096,L:32,nH:32,dH:128,nKV:8,dff:14336,bias:false,glu:true,tied:false,posLearned:false,seqPos:8192,rms:true,name:'Llama-3 8B'};state.h=4096;state.L=32;state.S=2048;state.B=1;}
+    state.preset=name;syncSliders();renderAll();
+  }
+
+  /* ===== 3D ===== */
+  var renderer,scene,camera,group,stars,boxFill,boxEdge,token,tokenWire,connector,lnArrow,axisGroup,fiberGroup,canvas,
+      dragging=false,lx=0,ly=0,interacted=false,sweep=0,az=-0.62,el=0.40,rad=10.5,rMin=3.6,rMax=34,pinchD=0,lastT=0;
+  var WARM=0xF0834A,AMBER=0xF2B24C,COOL=0x46B8CC,COOL2=0x7E8BF0,HCOL=0xF0834A,SCOL=0x6FA8C7,BCOL=0xA88FE0;
+  function clamp(t,a,b){return Math.max(a,Math.min(b,t));}
+  function mpf(x,lo,hi,a,b){return a+(b-a)*clamp((x-lo)/(hi-lo),0,1);}
+  function dims(){return {x:mpf(state.h,256,8192,1.8,5.4),y:mpf(state.S,512,8192,1.0,5.8),z:mpf(state.B,1,64,0.5,3.6)};}
+  function clearG(g){while(g.children.length){var c=g.children.pop();if(c.geometry)c.geometry.dispose();if(c.material){if(c.material.map)c.material.map.dispose();c.material.dispose();}g.remove(c);}}
+  function hx6(h){return '#'+h.toString(16).padStart(6,'0');}
+  function makeLabel(text,hex,w){var cv=document.createElement('canvas');cv.width=320;cv.height=96;var x=cv.getContext('2d');
+    x.font="500 46px 'JetBrains Mono', monospace";x.textAlign='center';x.textBaseline='middle';x.shadowColor=hx6(hex);x.shadowBlur=18;x.fillStyle=hx6(hex);x.fillText(text,160,48);
+    var tex=new THREE.CanvasTexture(cv);tex.minFilter=THREE.LinearFilter;tex.needsUpdate=true;var s=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false}));s.scale.set(w||1.5,(w||1.5)*0.3,1);return s;}
+  function axisArrow(dir,o,len,hex){return new THREE.ArrowHelper(dir,o,len,hex,Math.min(0.4,len*0.12),Math.min(0.26,len*0.08));}
+  var tokenOut;
+  function initThree(){
+    canvas=$('scene');if(!window.THREE){$('calc').textContent='3D engine failed to load (needs CDN access).';requestAnimationFrame(animate);return;}
+    renderer=new THREE.WebGLRenderer({canvas:canvas,antialias:true,alpha:true});scene=new THREE.Scene();
+    camera=new THREE.PerspectiveCamera(45,1,0.1,200);group=new THREE.Group();scene.add(group);
+    var NS=900,pos=new Float32Array(NS*3);
+    for(var i=0;i<NS;i++){var rr=18+Math.random()*60,th=Math.random()*6.283,ph=Math.acos(2*Math.random()-1);pos[i*3]=rr*Math.sin(ph)*Math.cos(th);pos[i*3+1]=rr*Math.sin(ph)*Math.sin(th);pos[i*3+2]=rr*Math.cos(ph);}
+    var pg=new THREE.BufferGeometry();pg.setAttribute('position',new THREE.BufferAttribute(pos,3));
+    stars=new THREE.Points(pg,new THREE.PointsMaterial({color:0x9FB2CC,size:0.13,sizeAttenuation:true,transparent:true,opacity:0.6}));scene.add(stars);
+    boxFill=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshBasicMaterial({color:WARM,transparent:true,opacity:0.1}));
+    boxEdge=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)),new THREE.LineBasicMaterial({color:WARM,transparent:true,opacity:0.8}));
+    token=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshBasicMaterial({color:AMBER,transparent:true,opacity:0.9}));
+    tokenWire=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)),new THREE.LineBasicMaterial({color:AMBER,transparent:true,opacity:0.95}));
+    connector=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]),new THREE.LineDashedMaterial({color:AMBER,transparent:true,opacity:0.5,dashSize:0.12,gapSize:0.1}));
+    group.add(boxFill);group.add(boxEdge);group.add(token);group.add(tokenWire);group.add(connector);
+    axisGroup=new THREE.Group();fiberGroup=new THREE.Group();group.add(axisGroup);group.add(fiberGroup);
+    updateCam();resize();
+    canvas.addEventListener('pointerdown',function(e){dragging=true;interacted=true;lx=e.clientX;ly=e.clientY;canvas.setPointerCapture(e.pointerId);});
+    canvas.addEventListener('pointermove',function(e){if(!dragging)return;az-=(e.clientX-lx)*0.006;el=clamp(el+(e.clientY-ly)*0.006,-1.35,1.35);lx=e.clientX;ly=e.clientY;updateCam();});
+    window.addEventListener('pointerup',function(){dragging=false;});
+    canvas.addEventListener('pointercancel',function(){dragging=false;});
+    canvas.addEventListener('wheel',function(e){e.preventDefault();interacted=true;rad=clamp(rad+e.deltaY*0.012,rMin,rMax);updateCam();},{passive:false});
+    canvas.addEventListener('touchmove',function(e){if(e.touches.length===2){e.preventDefault();var dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY,d=Math.hypot(dx,dy);if(pinchD){rad=clamp(rad+(pinchD-d)*0.03,rMin,rMax);updateCam();}pinchD=d;}},{passive:false});
+    canvas.addEventListener('touchend',function(){pinchD=0;});
+    $('zin').addEventListener('click',function(){interacted=true;rad=clamp(rad-1.4,rMin,rMax);updateCam();});
+    $('zout').addEventListener('click',function(){interacted=true;rad=clamp(rad+1.4,rMin,rMax);updateCam();});
+    window.addEventListener('resize',resize);rebuild();requestAnimationFrame(animate);
+  }
+  function updateCam(){if(!camera)return;camera.position.set(rad*Math.cos(el)*Math.sin(az),rad*Math.sin(el),rad*Math.cos(el)*Math.cos(az));camera.lookAt(0,0,0);}
+  function resize(){if(!renderer)return;var w=canvas.clientWidth,h=canvas.clientHeight;renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+  function rebuild(){
+    if(!renderer)return;var d=dims(),hx=d.x/2,hy=d.y/2,hz=d.z/2;
+    boxFill.scale.set(d.x,d.y,d.z);boxEdge.scale.set(d.x,d.y,d.z);
+    var ty=Math.min(0.32,d.y*0.15),tz=Math.min(0.32,d.z*0.48);token.scale.set(d.x,ty,tz);tokenWire.scale.set(d.x,ty,tz);
+    tokenOut=new THREE.Vector3(0,hy+1.05,hz*0.2);
+    connector.geometry.setFromPoints([new THREE.Vector3(0,hy*0.45,hz*0.45),tokenOut.clone()]);if(connector.computeLineDistances)connector.computeLineDistances();
+    clearG(axisGroup);var o=new THREE.Vector3(-hx,-hy,-hz);
+    axisGroup.add(axisArrow(new THREE.Vector3(1,0,0),o.clone(),d.x,HCOL));axisGroup.add(axisArrow(new THREE.Vector3(0,1,0),o.clone(),d.y,SCOL));axisGroup.add(axisArrow(new THREE.Vector3(0,0,1),o.clone(),d.z,BCOL));
+    var lh=makeLabel('H '+state.h,HCOL,1.7);lh.position.set(hx+0.5,-hy-0.15,-hz);axisGroup.add(lh);
+    var ls=makeLabel('S '+state.S,SCOL,1.9);ls.position.set(-hx-0.25,hy+0.45,-hz);axisGroup.add(ls);
+    var lb=makeLabel('B '+state.B,BCOL,1.6);lb.position.set(-hx-0.15,-hy-0.2,hz+0.55);axisGroup.add(lb);
+    clearG(fiberGroup);
+    var nh=state.nh,ex=Math.min(0.13,hx*0.11),segW=(d.x-ex*(nh-1))/nh,fy=ty,fz=tz;
+    var spots=[[tokenOut.y,tokenOut.z,1.0,1],[0,hz*0.1,0.3,0],[-hy*0.45,hz*0.4,0.3,0],[hy*0.4,-hz*0.4,0.3,0]];
+    for(var sI=0;sI<spots.length;sI++){var oy=spots[sI][0],oz=spots[sI][1],op=spots[sI][2],solid=spots[sI][3];
+      for(var k=0;k<nh;k++){var cx=-d.x/2+segW/2+k*(segW+ex),col=(k%2===0)?COOL:COOL2;
+        var seg=new THREE.Mesh(new THREE.BoxGeometry(segW,fy,fz),new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:0.5*op}));seg.position.set(cx,oy,oz);fiberGroup.add(seg);
+        if(solid){var sw=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(segW,fy,fz)),new THREE.LineBasicMaterial({color:col,transparent:true,opacity:0.95}));sw.position.copy(seg.position);fiberGroup.add(sw);}}}
+    if(lnArrow){group.remove(lnArrow);}
+    lnArrow=axisArrow(new THREE.Vector3(-1,0,0),new THREE.Vector3(hx,tokenOut.y,tokenOut.z),d.x,0xFAC679);group.add(lnArrow);
+    applyMode();
+  }
+  function is3D(m){return m==='tensor'||m==='token'||m==='layernorm'||m==='heads';}
+  function applyMode(){
+    var m=state.mode;
+    canvas.classList.toggle('hide',!is3D(m));$('zoomctl').classList.toggle('hide',!is3D(m));
+    $('ov-params').classList.toggle('show',m==='params');$('ov-act').classList.toggle('show',m==='activ');
+    $('ov-budget').classList.toggle('show',m==='budget');$('ov-step').classList.toggle('show',m==='step');
+    $('ov-profile').classList.toggle('show',m==='profile');$('ov-recomp').classList.toggle('show',m==='recomp');
+    $('ov-accum').classList.toggle('show',m==='accum');$('ov-trace').classList.toggle('show',m==='trace');
+    $('modetag').style.display=is3D(m)?'block':'none';$('hint').style.display=is3D(m)?'block':'none';
+    if(!is3D(m)||!renderer)return;
+    boxFill.visible=(m!=='heads');boxEdge.visible=true;
+    var tok=(m==='token'||m==='layernorm');token.visible=tok;tokenWire.visible=tok;connector.visible=tok||m==='heads';
+    if(tok){token.position.copy(tokenOut);tokenWire.position.copy(tokenOut);}
+    lnArrow.visible=(m==='layernorm');fiberGroup.visible=(m==='heads');
+    boxFill.material.opacity=(m==='token'||m==='layernorm')?0.05:0.1;boxEdge.material.opacity=(m==='heads')?0.35:0.8;
+  }
+  function animate(ts){requestAnimationFrame(animate);var dt=lastT?(ts-lastT)/1000:0.016;lastT=ts;
+    if(is3D(state.mode)){if(!renderer)return;if(!dragging&&!interacted&&!reduce){az+=0.0016;updateCam();}if(stars&&!reduce)stars.rotation.y+=0.0004;
+      if(state.mode==='layernorm'&&lnArrow&&!reduce){sweep=(sweep+0.012)%1;var d=dims();lnArrow.position.set(d.x/2-sweep*d.x,tokenOut.y,tokenOut.z);}renderer.render(scene,camera);}
+    else if(state.mode==='step'){stepFlow(dt);}
+    else if(state.mode==='profile'){pfTick(dt);}
+    else if(state.mode==='accum'){acTick(dt);}
+    else if(state.mode==='trace'){trTick(dt);}}
+
+  /* ===== act 05 params + glossary ===== */
+  function row(nm,fm,v){return '<div class="pp-row"><span class="nm">'+nm+'</span><span class="fm">'+fm+'</span><span class="vl">'+unit(v)+'</span></div>';}
+  function rowsub(nm,fm,v){return '<div class="pp-row sub"><span class="nm">'+nm+'</span><span class="fm">'+fm+'</span><span class="vl">'+unit(v)+'</span></div>';}
+  function renderParams(){
+    var c=cfg,b=paramBreak();
+    var attnF=c.bias?'2h·n_h·d_h + 2h·n_kv·d_h + bias':'2h·n_h·d_h + 2h·n_kv·d_h';
+    var mlpF=(c.glu?'3·h·d_ff':'2·h·d_ff')+(c.bias?' + bias':'');
+    var rows=row('token emb','v·h',b.tokenE)+row('pos emb',c.posLearned?'s·h':'RoPE → 0',b.posE)
+     +rowsub('attention /layer',attnF,b.attn)+rowsub('MLP /layer',mlpF,b.mlp)+rowsub('norms /layer',c.rms?'2·h (RMS)':'4·h (LN)',b.norms)
+     +row('× L layers','('+unit(b.per)+') × '+c.L,b.per*c.L)+row('final norm',c.rms?'h':'2h',b.finalN)+row('LM head',c.tied?'tied → 0':'v·h',b.head);
+    var emb=b.tokenE+b.posE,aA=b.attn*c.L,mA=b.mlp*c.L,nA=b.norms*c.L+b.finalN,hd=b.head,T=b.total;
+    function w(x){return (x/T*100).toFixed(2)+'%';}
+    var comp='<div class="pp-comp"><div style="width:'+w(emb)+';background:var(--cool2)"></div><div style="width:'+w(aA)+';background:var(--warm)"></div><div style="width:'+w(mA)+';background:var(--amber)"></div><div style="width:'+w(nA)+';background:var(--faint)"></div><div style="width:'+w(hd)+';background:var(--cool)"></div></div>'
+      +'<div class="pp-leg"><span><span class="d" style="background:var(--cool2)"></span>emb</span><span><span class="d" style="background:var(--warm)"></span>attn</span><span><span class="d" style="background:var(--amber)"></span>mlp</span><span><span class="d" style="background:var(--faint)"></span>norms</span><span><span class="d" style="background:var(--cool)"></span>head</span></div>';
+    var chk=(c.name==='GPT-2 124M'||c.name==='Llama-3 8B')?(' <span class="chk">= '+c.name+' ✓</span>'):'';
+    var gloss='<div class="glossary"><b>v</b> vocab · <b>s</b> seq len · <b>h</b> hidden (d_model) · <b>n_h</b> heads · <b>d_h</b> head dim (h/n_h) · <b>n_kv</b> key/value heads · <b>d_ff</b> MLP inner (≈4h) · <b>L</b> layers · <b>b</b> batch</div>';
+    $('ov-params').innerHTML='<div class="pp-total">config: <b>'+c.name+'</b></div>'
+      +'<div class="pp-rows">'+rows+'<div class="pp-row tot"><span class="nm">TOTAL N</span><span class="fm">'+unit(b.total)+'</span><span class="vl"><span id="pp-cnt">'+fmt(b.total)+'</span>'+chk+'</span></div></div>'+comp+gloss;
+    countTo($('pp-cnt'),ppPrev,b.total,650);ppPrev=b.total;
+  }
+
+  /* ===== act 06 activation anatomy ===== */
+  function renderActiv(){
+    var b=state.B,s=state.S,h=state.h,nh=cfg.nH,L=state.L;
+    var sbh=s*b*h;
+    var lin=34*sbh, quad=5*nh*s*s*b, per=lin+quad;
+    var lf=(lin/per*100).toFixed(1), qf=(quad/per*100).toFixed(1);
+    var mat='';for(var i=0;i<49;i++)mat+='<div></div>';
+    $('ov-act').innerHTML=''
+      +'<div class="ac-body">'
+      +'<div class="ac-card"><div class="h">Feed-forward — saves <b>3</b> tensors</div>'
+        +'<div class="ac-chain"><span class="t">x</span><span class="op">—W_up→</span><span class="t">pre</span><span class="op">—act→</span><span class="t">act</span><span class="op">—W_down→</span><span class="t">out</span></div>'
+        +'<div class="ac-row"><span>x  (input)</span><span class="vl">b·s·h</span></div>'
+        +'<div class="ac-row"><span>pre  (up-projection, before act)</span><span class="vl">b·s·4h</span></div>'
+        +'<div class="ac-row"><span>act  (after GeLU/ReLU)</span><span class="vl">b·s·4h</span></div>'
+        +'<div class="ac-row ac-sum"><span>= 9·b·s·h elems × 2 bytes</span><span><b>18·s·b·h</b></span></div></div>'
+      +'<div class="ac-card"><div class="h">Attention — saves <b>more</b>, incl. the s×s matrix</div>'
+        +'<div class="ac-row"><span>x, Q, K, V, Z (context)</span><span class="vl">5·s·b·h</span></div>'
+        +'<div class="ac-row"><span>scores &amp; weights (softmax)</span><span class="vl">2·n_h·s²·b</span></div>'
+        +'<div class="ac-row"><span>mask + dropout (1-byte)</span><span class="vl">≈ 2·s·b·h</span></div>'
+        +'<div style="display:flex;gap:10px;align-items:center;margin-top:6px;"><div class="ac-mat">'+mat+'</div><div class="ac-note">attention scores are <b style="color:var(--warm)">b·n_h·s²</b> — one s×s grid per head. Double s and this <b style="color:var(--warm)">quadruples</b>.</div></div></div>'
+      +'<div class="ac-card"><div class="h">Per layer (mixed precision)</div>'
+        +'<div class="ac-row ac-sum"><span>s·b·h·(34 + 5·n_h·s/h)</span><span><b>'+GB(per)+' GB</b></span></div>'
+        +'<div class="ac-twobar"><div class="ac-lin" style="width:'+lf+'%"></div><div class="ac-quad" style="width:'+qf+'%"></div></div>'
+        +'<div class="ac-note"><span style="color:var(--cool)">34·sbh</span> linear ('+lf+'%) · <span style="color:var(--warm)">5·n_h·s²b</span> quadratic ('+qf+'%) — push S and the warm part takes over.</div>'
+        +'<div class="ac-row" style="margin-top:5px;"><span>× L = '+L+' layers</span><span class="vl">'+GB(per*L)+' GB</span></div></div>'
+      +'<div class="ac-note">linear in batch b, <b style="color:var(--warm)">quadratic</b> in sequence s — the reason long context blows up memory.</div>'
+      +'</div>';
+  }
+
+  /* ===== act 07 treemap (with precision toggle) ===== */
+  function tmMods(m){var s='';
+    if(state.recomp!=='none')s+=' &middot; <span style="color:var(--cool)">recompute: '+state.recomp+'</span>';
+    if(state.acc>1)s+=' &middot; <span style="color:var(--cool)">accum &times;'+state.acc+' (mbs '+m.micro+')</span>';
+    return s;}
+  function renderTreemap(){
+    var m=memory(),over=m.tot>m.cap;
+    $('ov-budget').classList.toggle('tm-anim',tmAnim);tmAnim=false;
+    var aGB=m.a/1073741824,msGB=m.ms/1073741824,totGB=m.tot/1073741824;
+    var perGB=(m.a/m.L/1073741824).toFixed(2),grid='';
+    for(var i=0;i<m.L;i++) grid+='<div class="tm-layer" style="animation-delay:'+(i*8)+'ms" title="Layer '+(i+1)+': '+perGB+' GB"><div class="tm-att"></div><div class="tm-ff"></div></div>';
+    var pG=m.p/1073741824,gG=m.g/1073741824,oG=m.o/1073741824,mG=m.master/1073741824;
+    var masterTile=(m.master>0)?'<div class="tm-tile tm-master" style="flex:'+mG.toFixed(3)+'">Master fp32<small>'+mG.toFixed(1)+' GB</small></div>':'';
+    var msFormula=(state.prec==='fp32')?'4+4+8 = 16 B/param':'2+2+8+4 = 16 B/param';
+    var capTop=over?(m.cap/m.tot*100):0;
+    var capEls=over?('<div class="tm-capline" style="top:'+capTop.toFixed(2)+'%"></div><div class="tm-caplbl" style="top:'+capTop.toFixed(2)+'%">'+state.gpu+'G cap · over by '+(totGB-state.gpu).toFixed(0)+'G</div>'):'';
+    $('ov-budget').innerHTML=''
+      +'<div class="tm-total"><span>total <b>'+totGB.toFixed(1)+' GB</b> / '+state.gpu+' GB &rarr; '+(over?'<span class="bad">OOM</span>':'<span class="ok">fits</span>')+'</span>'
+        +'<span class="seg2"><button id="pr-mixed" class="'+(state.prec==='mixed'?'on':'')+'">mixed bf16</button><button id="pr-fp32" class="'+(state.prec==='fp32'?'on':'')+'">fp32</button></span></div>'
+      +'<div class="tm-fill">'
+        +'<div class="tm-region'+(over?' oom':'')+'" style="flex:'+Math.max(0.18,aGB).toFixed(3)+'"><div class="tm-rhead">Activations <b>'+aGB.toFixed(1)+' GB</b> · '+m.L+'×'+perGB+' · '+(state.prec==='fp32'?'4-byte':'2-byte')+' · grows with B·S'+tmMods(m)+'</div><div class="tm-grid">'+grid+'</div></div>'
+        +'<div class="tm-region" style="flex:'+Math.max(0.18,msGB).toFixed(3)+'"><div class="tm-rhead">Model state <b>'+msGB.toFixed(1)+' GB</b> · '+msFormula+'</div><div class="tm-body">'
+          +'<div class="tm-col" style="flex:'+(pG+gG).toFixed(3)+'"><div class="tm-tile tm-params" style="flex:'+Math.max(0.1,pG).toFixed(3)+'">Params<small>'+pG.toFixed(1)+'G</small></div><div class="tm-tile tm-grads" style="flex:'+Math.max(0.1,gG).toFixed(3)+'">Grads<small>'+gG.toFixed(1)+'G</small></div></div>'
+          +'<div class="tm-tile tm-optim" style="flex:'+oG.toFixed(3)+'">Optimizer<small>'+oG.toFixed(1)+'G · m+v</small></div>'+masterTile
+        +'</div></div>'
+        +capEls
+      +'</div>';
+    var pm=$('pr-mixed'),pf=$('pr-fp32');
+    if(pm)pm.addEventListener('click',function(){state.prec='mixed';renderAll();});
+    if(pf)pf.addEventListener('click',function(){state.prec='fp32';renderAll();});
+  }
+
+  /* ===== act 08 flow ===== */
+  var flowEls=null,flowPhase=0,flowT=0,PHASE=2.4,NL=7;
+  var phaseCap=['Forward — each layer caches its activations. These are the <b>activation</b> block, growing with B·S.',
+    'Backward — uses the cached activations to compute gradients, layer by layer.',
+    'Gradients — one per parameter → <b>same size as the model</b>.',
+    'Optimizer (Adam) — momentum + variance per parameter → the <b>biggest block</b>.',
+    'Updated. Repeats — model state never resized; only activations track your batch.'];
+  function buildFlow(){
+    var W=660,x0=44,gap=72,bw=46,bh=40,i;function cx(i){return x0+i*gap;}
+    var s='<svg viewBox="0 0 '+W+' 320" xmlns="http://www.w3.org/2000/svg">';
+    for(i=0;i<NL;i++) s+='<rect x="'+cx(i)+'" y="16" width="'+bw+'" height="'+bh+'" rx="7" fill="#B9A7F0" opacity="0.85"/>';
+    s+='<text x="'+(W-108)+'" y="40" fill="#B9A7F0" font-family="JetBrains Mono,monospace" font-size="13">Model</text>';
+    s+='<line x1="20" y1="80" x2="'+(W-128)+'" y2="80" stroke="#46B8CC" stroke-width="2"/><circle id="fwd" cx="20" cy="80" r="6" fill="#7DE3F2" opacity="0"/><text x="'+(W-108)+'" y="84" fill="#46B8CC" font-family="JetBrains Mono,monospace" font-size="13">Forward</text>';
+    s+='<line x1="'+(W-128)+'" y1="108" x2="20" y2="108" stroke="#F0834A" stroke-width="2"/><circle id="bwd" cx="'+(W-128)+'" cy="108" r="6" fill="#FBB37F" opacity="0"/><text x="'+(W-108)+'" y="112" fill="#F0834A" font-family="JetBrains Mono,monospace" font-size="13">Backward</text>';
+    for(i=0;i<NL;i++) s+='<rect id="g'+i+'" x="'+cx(i)+'" y="132" width="'+bw+'" height="'+bh+'" rx="7" fill="#E87FAE" opacity="0.22"/>';
+    s+='<text x="'+(W-108)+'" y="156" fill="#E87FAE" font-family="JetBrains Mono,monospace" font-size="13">Gradients</text>';
+    for(i=0;i<NL;i++) s+='<line id="o'+i+'" x1="'+(cx(i)+bw/2)+'" y1="178" x2="'+(cx(i)+bw/2)+'" y2="208" stroke="#5FBF8A" stroke-width="2" opacity="0.22"/>';
+    s+='<text x="'+(W-108)+'" y="196" fill="#5FBF8A" font-family="JetBrains Mono,monospace" font-size="13">Optimize</text>';
+    for(i=0;i<NL;i++) s+='<rect id="u'+i+'" x="'+cx(i)+'" y="212" width="'+bw+'" height="'+bh+'" rx="7" fill="#8B6FD6" opacity="0.28"/>';
+    s+='<text x="'+(W-108)+'" y="236" fill="#9D86E0" font-family="JetBrains Mono,monospace" font-size="13">Updated</text></svg>';
+    $('flow-wrap').innerHTML=s;flowEls={fwd:$('fwd'),bwd:$('bwd'),g:[],o:[],u:[]};
+    for(i=0;i<NL;i++){flowEls.g.push($('g'+i));flowEls.o.push($('o'+i));flowEls.u.push($('u'+i));}
+    flowPhase=0;flowT=0;$('flow-cap').innerHTML=phaseCap[0];
+  }
+  function stepFlow(dt){
+    if(!flowEls)buildFlow();
+    if(reduce){flowEls.fwd.setAttribute('opacity',0);flowEls.bwd.setAttribute('opacity',0);for(var k=0;k<NL;k++){flowEls.g[k].setAttribute('opacity',1);flowEls.o[k].setAttribute('opacity',0.7);flowEls.u[k].setAttribute('opacity',1);}$('flow-cap').innerHTML=phaseCap[2];return;}
+    flowT+=dt;var pr=clamp(flowT/PHASE,0,1);
+    if(flowT>=PHASE){flowPhase=(flowPhase+1)%5;flowT=0;pr=0;$('flow-cap').innerHTML=phaseCap[flowPhase];}
+    var p=flowPhase,W=660;
+    flowEls.fwd.setAttribute('opacity',p===0?1:0);if(p===0)flowEls.fwd.setAttribute('cx',20+pr*(W-148));
+    flowEls.bwd.setAttribute('opacity',p===1?1:0);if(p===1)flowEls.bwd.setAttribute('cx',(W-128)-pr*(W-148));
+    for(var i=0;i<NL;i++){
+      flowEls.g[i].setAttribute('opacity',(p>2)?1:(p===2?(((pr*NL)>(NL-1-i))?1:0.22):0.22));
+      flowEls.o[i].setAttribute('opacity',(p>3)?0.7:(p===3?0.3+0.5*Math.abs(Math.sin(pr*6+i*0.5)):0.22));
+      flowEls.u[i].setAttribute('opacity',(p===4)?(((pr*NL)>i)?1:0.28):(p>4?1:0.28));
+    }
+  }
+
+  /* ===== act 09 memory profile of 4 steps ===== */
+  var pfT=0,PF_STEP=3.0,pfReady=false,pfN=320,pfMX=46,pfPW=0,pfFW=0.45,pfBW=0.85;
+  function pfCap(k,u){
+    if(k===0){
+      if(u<pfFW)return 'step 1 &middot; forward — activations climb, then <b>plateau</b>: the caching allocator preps blocks so later steps never hunt for free memory.';
+      if(u<pfBW)return 'step 1 &middot; backward — gradients build; each cached activation is <b>freed the moment it is consumed</b>.';
+      return 'step 1 &middot; optimizer — needs every gradient. <b>Optimizer states appear now</b> — and never leave.';
+    }
+    if(u<pfFW)return 'step '+(k+1)+' &middot; forward — same climb, now sitting <b>on top of optimizer states</b>.';
+    if(u<pfBW)return 'step '+(k+1)+' &middot; backward — activations drain into gradients, layer by layer.';
+    return 'step '+(k+1)+' &middot; optimizer — update, clear grads, go again.';
+  }
+  function pfStack(t,v){
+    var k=Math.floor(t),u=t-k,act,grad,opt;
+    if(k===0){
+      if(u<0.2)act=v.a*(u/0.2);else if(u<pfFW)act=v.a;
+      else if(u<pfBW)act=v.a*(1-0.92*(u-pfFW)/(pfBW-pfFW+0.4-0.4));else act=v.a*0.08;
+      opt=(u<pfBW)?0:v.o*Math.min(1,(u-pfBW)/(1-pfBW));
+    }else{
+      if(u<pfFW)act=v.a*Math.pow(u/pfFW,0.85);
+      else if(u<pfBW)act=v.a*(1-0.92*(u-pfFW)/(pfBW-pfFW));else act=v.a*0.08;
+      opt=v.o;
+    }
+    if(u<pfFW)grad=0;else if(u<pfBW)grad=v.g*(u-pfFW)/(pfBW-pfFW);else grad=v.g;
+    return [v.p,opt,act,grad];
+  }
+  function renderProfile(){
+    var m=memory(),Gb=1/1073741824,i,q,j;
+    var v={p:(m.p+m.master)*Gb,o:m.o*Gb,g:m.g*Gb,a:m.a*Gb,cap:state.gpu};
+    var W=680,H=340,my=16,mbm=30;pfPW=W-pfMX-14;
+    var ph=H-my-mbm,samples=[],peak=0;
+    for(i=0;i<=pfN;i++){var sm=pfStack(Math.min(3.9999,4*i/pfN),v);samples.push(sm);var tt=sm[0]+sm[1]+sm[2]+sm[3];if(tt>peak)peak=tt;}
+    var yMax=Math.max(peak*1.2,v.cap*1.08,1e-9);
+    function X(ii){return pfMX+pfPW*ii/pfN;}function Y(val){return my+ph*(1-val/yMax);}
+    var cols=['#5FA89B','#E87FAE','#B9A7F0','#F2B24C'],names=['params','optimizer','activations','gradients'];
+    function area(jj){
+      var d='',lo;
+      for(i=0;i<=pfN;i++){lo=0;for(q=0;q<jj;q++)lo+=samples[i][q];d+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(lo+samples[i][jj]).toFixed(1);}
+      for(i=pfN;i>=0;i--){lo=0;for(q=0;q<jj;q++)lo+=samples[i][q];d+='L'+X(i).toFixed(1)+' '+Y(lo).toFixed(1);}
+      return d+'Z';
+    }
+    var areas='',dim='';
+    for(j=0;j<4;j++){var dd=area(j);dim+='<path d="'+dd+'" fill="'+cols[j]+'" opacity="0.10"/>';areas+='<path d="'+dd+'" fill="'+cols[j]+'" opacity="0.6"/>';}
+    var grid='';
+    for(i=0;i<4;i++){var gx=pfMX+pfPW*(i+0.5)/4;grid+='<text x="'+gx.toFixed(1)+'" y="'+(H-9)+'" fill="#586271" font-size="10" text-anchor="middle" font-family="JetBrains Mono,monospace">step '+(i+1)+'</text>';}
+    for(i=1;i<=3;i++){var bx=pfMX+pfPW*i/4;grid+='<line x1="'+bx.toFixed(1)+'" y1="'+my+'" x2="'+bx.toFixed(1)+'" y2="'+(my+ph)+'" stroke="#222B36" stroke-width="1"/>';}
+    for(i=1;i<=4;i++){var gv=yMax*i/4,gy=Y(gv);grid+='<line x1="'+pfMX+'" y1="'+gy.toFixed(1)+'" x2="'+(pfMX+pfPW)+'" y2="'+gy.toFixed(1)+'" stroke="#222B36" stroke-width="0.5" opacity="0.6"/><text x="'+(pfMX-6)+'" y="'+(gy+3).toFixed(1)+'" fill="#586271" font-size="10" text-anchor="end" font-family="JetBrains Mono,monospace">'+Math.round(gv)+'G</text>';}
+    var mk='',mks=[[pfFW,'FP ends','#33404E'],[pfBW,'BP &middot; OPT','#EA5A53']];
+    for(j=0;j<2;j++){for(var k2=0;k2<4;k2++){var xx=pfMX+pfPW*(k2+mks[j][0])/4;
+      mk+='<line x1="'+xx.toFixed(1)+'" y1="'+my+'" x2="'+xx.toFixed(1)+'" y2="'+(my+ph)+'" stroke="'+mks[j][2]+'" stroke-width="1" stroke-dasharray="3 4" opacity="'+(k2<2?0.55:0.25)+'"/>';
+      if(k2===0)mk+='<text x="'+(xx+3).toFixed(1)+'" y="'+(my+11)+'" fill="#8893A2" font-size="9.5" font-family="JetBrains Mono,monospace">'+mks[j][1]+'</text>';}}
+    var capL='';
+    if(v.cap<yMax){var cy=Y(v.cap);capL='<line x1="'+pfMX+'" y1="'+cy.toFixed(1)+'" x2="'+(pfMX+pfPW)+'" y2="'+cy.toFixed(1)+'" stroke="#EA5A53" stroke-width="1.6" stroke-dasharray="6 5"/><text x="'+(pfMX+pfPW)+'" y="'+(cy-5).toFixed(1)+'" fill="#EA5A53" font-size="10" text-anchor="end" font-family="JetBrains Mono,monospace">'+state.gpu+'G GPU</text>';}
+    var py=Y(peak);
+    var reqL='<line x1="'+pfMX+'" y1="'+py.toFixed(1)+'" x2="'+(pfMX+pfPW)+'" y2="'+py.toFixed(1)+'" stroke="#8893A2" stroke-width="1" stroke-dasharray="2 4"/><text x="'+(pfMX+4)+'" y="'+(py-4).toFixed(1)+'" fill="#8893A2" font-size="9.5" font-family="JetBrains Mono,monospace">peak '+peak.toFixed(1)+'G</text>';
+    var leg='';for(j=0;j<4;j++)leg+='<span><span class="d" style="background:'+cols[j]+'"></span>'+names[j]+'</span>';
+    var p1=(m.tot-m.o)*1,oomNote;
+    if(m.tot>m.cap&&p1<=m.cap)oomNote='<span class="bad">fits step 1 &middot; OOMs step 2</span>';
+    else if(m.tot>m.cap)oomNote='<span class="bad">OOM from step 1</span>';
+    else oomNote='<span class="ok">all 4 steps fit</span>';
+    $('ov-profile').innerHTML=''
+      +'<div class="pf-head"><span class="pf-leg">'+leg+'</span><span class="pk">'+oomNote+'</span></div>'
+      +'<div class="pf-wrap"><svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg">'
+      +grid+dim
+      +'<clipPath id="pfclip"><rect id="pf-clipr" x="0" y="0" width="'+(reduce?W:pfMX)+'" height="'+H+'"/></clipPath>'
+      +'<g clip-path="url(#pfclip)">'+areas+'</g>'
+      +mk+capL+reqL
+      +'<line id="pf-cursor" x1="'+pfMX+'" y1="'+my+'" x2="'+pfMX+'" y2="'+(my+ph)+'" stroke="#DCE2EA" stroke-width="1.2" opacity="'+(reduce?0:0.9)+'"/>'
+      +'</svg></div>'
+      +'<div class="pf-cap" id="pf-cap">'+(reduce?'forward fills, backward drains activations into gradients, optimizer states appear after step 1 and never leave.':'')+'</div>';
+    pfReady=true;
+  }
+  function pfTick(dt){
+    if(!pfReady)renderProfile();
+    if(reduce)return;
+    pfT+=dt;var t=(pfT/PF_STEP)%4,k=Math.floor(t),u=t-k;
+    var cl=$('pf-clipr'),cu=$('pf-cursor');if(!cl)return;
+    var x=pfMX+pfPW*t/4;
+    cl.setAttribute('width',x);cu.setAttribute('x1',x);cu.setAttribute('x2',x);
+    var cap=$('pf-cap'),key=k+'-'+(u<pfFW?0:(u<pfBW?1:2));
+    if(cap&&cap.getAttribute('data-k')!==key){cap.setAttribute('data-k',key);cap.innerHTML=pfCap(k,u);}
+  }
+
+  /* ===== act 10 activation recomputation ===== */
+  function renderRecomp(){
+    var m=memory(),L=state.L,mb=m.micro;
+    var Gx=function(x){var g=x/1073741824;return g.toFixed(g<10?2:1);};
+    var fp32x=(state.prec==='fp32')?2:1;
+    var lin=34*state.S*mb*state.h,quad=5*cfg.nH*state.S*state.S*mb;
+    var none=(lin+quad)*L*fp32x,sel=lin*L*fp32x,full=2*state.S*mb*state.h*L*fp32x;
+    var f=flopsFwd(),ovS=1+f.score/(3*f.fwd),ovF=4/3,mx=none;
+    function bar(key,lbl,val,ov){
+      var on=state.recomp===key,w=Math.max(1.2,val/mx*100);
+      return '<div class="rc-bar'+(on?' on':'')+'"><span class="lbl">'+lbl+'</span><div class="tr"><div class="fl" style="width:'+w.toFixed(2)+'%;background:'+(on?'var(--warm)':'rgba(240,131,74,0.35)')+'"></div></div><span class="gb">'+Gx(val)+'G &middot; &times;'+ov.toFixed(2)+'</span></div>';
+    }
+    var extra=(state.recomp==='none')?0:(state.recomp==='selective'?f.score/f.fwd:1);
+    var totU=3+extra,curOv=(state.recomp==='none')?1:(state.recomp==='selective'?ovS:ovF);
+    var seg='<div class="fl-seg">'
+      +'<div style="width:'+(1/totU*100).toFixed(1)+'%;background:var(--cool)"></div>'
+      +'<div style="width:'+(2/totU*100).toFixed(1)+'%;background:var(--cool2)"></div>'
+      +(extra>0?'<div style="width:'+(extra/totU*100).toFixed(1)+'%;background:var(--warm)"></div>':'')
+      +'</div>';
+    $('ov-recomp').innerHTML=''
+      +'<div class="tm-total"><span>strategy</span><span class="seg2">'
+      +'<button id="rc-none" class="'+(state.recomp==='none'?'on':'')+'">none</button>'
+      +'<button id="rc-sel" class="'+(state.recomp==='selective'?'on':'')+'">selective</button>'
+      +'<button id="rc-full" class="'+(state.recomp==='full'?'on':'')+'">full</button></span></div>'
+      +'<div class="ac-body">'
+      +'<div class="ac-card"><div class="h">Activation memory, all '+L+' layers — the area you <b>stop paying for</b></div>'
+        +bar('none','none',none,1)+bar('selective','selective',sel,ovS)+bar('full','full',full,ovF)
+        +'<div class="ac-note">selective drops only the <b style="color:var(--warm)">5&middot;n_h&middot;s&sup2;&middot;b</b> score/softmax matrices — FlashAttention does this natively, so most stacks already run it. full keeps one <b>checkpoint</b> (&asymp;2&middot;s&middot;b&middot;h bytes) per layer boundary and replays everything else.</div></div>'
+      +'<div class="ac-card"><div class="h">The bill: one step = fwd + bwd'+(extra>0?' + recompute':'')+' &rarr; <b>&times;'+curOv.toFixed(2)+'</b> compute</div>'
+        +seg
+        +'<div class="ac-note"><span style="color:var(--cool)">forward 1&times;</span> &middot; <span style="color:var(--cool2)">backward &asymp;2&times;</span> (&part;L/&part;x + &part;L/&part;W)'+(extra>0?' &middot; <span style="color:var(--warm)">recompute +'+extra.toFixed(2)+'&times; fwd</span>':'')+' — recomputed work replays the forward inside the backward pass. Often <i>faster</i> anyway: less memory traffic.</div></div>'
+      +'<div class="ac-card"><div class="h">Checkpoint = save point</div><div class="ac-note">Keep the layer-boundary hidden state, discard everything inside. Backward loads the save point, replays the layer to regenerate Q, K, V, scores and FFN intermediates — then frees them again. <b>Act 07&rsquo;s treemap and act 09&rsquo;s profile now use this setting.</b></div></div>'
+      +'</div>';
+    var bn=$('rc-none'),bs=$('rc-sel'),bf=$('rc-full');
+    function setR(r){state.recomp=r;pfReady=false;renderRecomp();renderCalc();}
+    if(bn)bn.addEventListener('click',function(){setR('none');});
+    if(bs)bs.addEventListener('click',function(){setR('selective');});
+    if(bf)bf.addEventListener('click',function(){setR('full');});
+  }
+
+  /* ===== act 11 gradient accumulation ===== */
+  var acT=0,acReady=false;
+  function renderAccum(){
+    var N=state.acc,B=state.B,mb=Math.max(1,Math.round(B/N)),gbs=mb*N;
+    var L=state.L,fp32x=(state.prec==='fp32')?2:1;
+    var aFull=activLayerBytes(B)*L*fp32x,aMicro=activLayerBytes(mb)*L*fp32x;
+    var Gx=function(x){var g=x/1073741824;return g.toFixed(g<10?2:1);};
+    var chips='',cw=300/N;
+    for(var i=0;i<N;i++)chips+='<rect id="am-c'+i+'" x="'+(20+i*cw).toFixed(1)+'" y="16" width="'+Math.max(2,cw-5).toFixed(1)+'" height="22" rx="5" fill="#7E8BF0" opacity="0.25"/>';
+    var ratio=aMicro/Math.max(1,aFull);
+    $('ov-accum').innerHTML=''
+      +'<div class="tm-total"><span>accumulation steps N</span><span class="seg2">'
+      +[1,2,4,8,16].map(function(n){return '<button class="am-n'+(state.acc===n?' on':'')+'" data-n="'+n+'">'+n+'</button>';}).join('')+'</span></div>'
+      +'<div class="ac-body">'
+      +'<div class="ac-card"><div class="h">gbs = mbs &times; N &rarr; <b>'+mb+' &times; '+N+' = '+gbs+'</b> &nbsp;(slider B = global batch)</div>'
+      +'<svg viewBox="0 0 660 132" xmlns="http://www.w3.org/2000/svg">'
+      +'<text x="20" y="10" fill="#8893A2" font-size="10" font-family="JetBrains Mono,monospace">micro-batches, run sequentially</text>'
+      +chips
+      +'<text x="340" y="31" id="am-ph" fill="#DCE2EA" font-size="11" font-family="JetBrains Mono,monospace">forward</text>'
+      +'<text x="20" y="62" fill="#46B8CC" font-size="10" font-family="JetBrains Mono,monospace">activations — one micro-batch at a time</text>'
+      +'<rect x="20" y="68" width="300" height="12" rx="3" fill="none" stroke="#33404E"/><rect id="am-act" x="20" y="68" width="0" height="12" rx="3" fill="#46B8CC" opacity="0.8"/>'
+      +'<text x="20" y="104" fill="#E87FAE" font-size="10" font-family="JetBrains Mono,monospace">gradient buffer — persists the whole step</text>'
+      +'<rect x="20" y="110" width="300" height="12" rx="3" fill="none" stroke="#33404E"/><rect id="am-grad" x="20" y="110" width="0" height="12" rx="3" fill="#E87FAE" opacity="0.8"/>'
+      +'<rect id="am-opt" x="360" y="62" width="150" height="60" rx="9" fill="#5FBF8A" opacity="0.12" stroke="#5FBF8A" stroke-opacity="0.4"/>'
+      +'<text x="435" y="89" fill="#5FBF8A" font-size="11" text-anchor="middle" font-family="JetBrains Mono,monospace">optimizer step</text>'
+      +'<text x="435" y="104" fill="#5FBF8A" font-size="10" text-anchor="middle" font-family="JetBrains Mono,monospace">on &Sigma;grads / N</text>'
+      +'</svg></div>'
+      +'<div class="ac-card"><div class="h">Activation memory follows <b>mbs</b>, not gbs</div>'
+      +'<div class="rc-bar"><span class="lbl">B='+B+' at once</span><div class="tr"><div class="fl" style="width:100%;background:rgba(70,184,204,0.35)"></div></div><span class="gb">'+Gx(aFull)+'G</span></div>'
+      +'<div class="rc-bar on"><span class="lbl">mbs='+mb+' &times;'+N+'</span><div class="tr"><div class="fl" style="width:'+Math.max(1.2,ratio*100).toFixed(1)+'%;background:var(--cool)"></div></div><span class="gb">'+Gx(aMicro)+'G</span></div>'
+      +'<div class="ac-note">sum gradients over N micro-batches, divide by N, one optimizer step — <b>mathematically identical</b> to the big batch. Cost: N sequential fwd/bwd passes. And the gradient buffer never shrinks: it persists through the whole step, slightly raising peak memory vs plain small-batch training. <b>Acts 07 and 09 inherit this setting.</b></div></div>'
+      +'</div>';
+    var bts=document.querySelectorAll('.am-n');
+    for(var b2=0;b2<bts.length;b2++)(function(bt){bt.addEventListener('click',function(){state.acc=parseInt(bt.getAttribute('data-n'),10);pfReady=false;renderAccum();renderCalc();});})(bts[b2]);
+    acReady=true;acT=0;
+  }
+  function acTick(dt){
+    if(!acReady)renderAccum();
+    var ga=$('am-grad'),aa=$('am-act'),ph=$('am-ph'),op=$('am-opt');if(!ga)return;
+    if(reduce){ga.setAttribute('width',300);aa.setAttribute('width',0);ph.textContent='N micro-batches -> 1 optimizer step';return;}
+    acT+=dt;
+    var N=state.acc,D=1.1,OPTD=1.0,cycle=N*D+OPTD,t=acT%cycle,i;
+    if(t<N*D){
+      var k=Math.floor(t/D),u=(t-k*D)/D;
+      for(i=0;i<N;i++){var ch=$('am-c'+i);if(ch)ch.setAttribute('opacity',i<k?0.55:(i===k?0.95:0.25));}
+      var aw=(u<0.5)?(u/0.5):(1-(u-0.5)/0.5);
+      aa.setAttribute('width',(300*aw).toFixed(1));
+      ga.setAttribute('width',(300*((k+(u<0.5?0:(u-0.5)/0.5))/N)).toFixed(1));
+      ph.textContent='micro '+(k+1)+'/'+N+' \u00b7 '+(u<0.5?'forward':'backward (+grad)');
+      op.setAttribute('opacity',0.12);
+    }else{
+      var v2=(t-N*D)/OPTD;
+      aa.setAttribute('width',0);ga.setAttribute('width',(300*(1-v2)).toFixed(1));
+      ph.textContent='optimizer step (\u00f7'+N+')';
+      op.setAttribute('opacity',(0.15+0.5*Math.abs(Math.sin(v2*6))).toFixed(2));
+      for(i=0;i<N;i++){var c2=$('am-c'+i);if(c2)c2.setAttribute('opacity',0.25);}
+    }
+  }
+
+  /* ===== act 12 profiler trace ===== */
+  var trT=0,trReady=false,trMode='seq',TR_TOT=100,trMX=104,trPW=0;
+  function renderTrace(){
+    var W=680,H=300;trPW=W-trMX-14;
+    function X(t){return trMX+trPW*t/TR_TOT;}
+    var seq={cmp:[['F1',0,10,'#46B8CC'],['F2',10,20,'#46B8CC'],['F3',20,30,'#46B8CC'],['B3',30,44,'#7E8BF0'],['B2',44,58,'#7E8BF0'],['B1',58,72,'#7E8BF0'],['OPT',92,100,'#5FBF8A']],
+             com:[['all-reduce grads',72,92,'#E87FAE']],
+             idle:[[104,72,92,'GPU idle'],[194,0,72,'comm idle']],end:100};
+    var ovl={cmp:[['F1',0,10,'#46B8CC'],['F2',10,20,'#46B8CC'],['F3',20,30,'#46B8CC'],['B3',30,44,'#7E8BF0'],['B2',44,58,'#7E8BF0'],['B1',58,72,'#7E8BF0'],['OPT',74,82,'#5FBF8A']],
+             com:[['AR g3',44,58,'#E87FAE'],['AR g2',58,72,'#E87FAE'],['g1',72,74,'#E87FAE']],
+             idle:[],end:82};
+    var sc=(trMode==='seq')?seq:ovl,s='',i,lanes=[['CPU launches',36],['CUDA stream &middot; compute',125],['CUDA stream &middot; comm',215]];
+    for(i=0;i<lanes.length;i++)s+='<text x="'+(trMX-8)+'" y="'+lanes[i][1]+'" fill="#8893A2" font-size="10" text-anchor="end" font-family="JetBrains Mono,monospace">'+lanes[i][0]+'</text>';
+    for(i=0;i<=4;i++){var ax=X(i*25);s+='<line x1="'+ax.toFixed(1)+'" y1="18" x2="'+ax.toFixed(1)+'" y2="246" stroke="#222B36" stroke-width="0.6" opacity="0.7"/><text x="'+ax.toFixed(1)+'" y="262" fill="#586271" font-size="9.5" text-anchor="middle" font-family="JetBrains Mono,monospace">'+(i*25)+'</text>';}
+    s+='<text x="'+(trMX+trPW/2)+'" y="278" fill="#586271" font-size="9.5" text-anchor="middle" font-family="JetBrains Mono,monospace">time (arbitrary units)</text>';
+    function blocks(arr,y){var o='';for(var j=0;j<arr.length;j++){var kk=arr[j],x=X(kk[1]),w=X(kk[2])-x;
+      o+='<rect x="'+x.toFixed(1)+'" y="'+y+'" width="'+Math.max(2,w-2).toFixed(1)+'" height="34" rx="5" fill="'+kk[3]+'" opacity="0.5" stroke="'+kk[3]+'" stroke-opacity="0.85"/>';
+      if(w>30)o+='<text x="'+(x+w/2).toFixed(1)+'" y="'+(y+21)+'" fill="#DCE2EA" font-size="9.5" text-anchor="middle" font-family="JetBrains Mono,monospace">'+kk[0]+'</text>';
+      o+='<rect x="'+x.toFixed(1)+'" y="24" width="4" height="14" rx="1.5" fill="#F2B24C" opacity="0.85"/>';}
+      return o;}
+    var body=blocks(sc.cmp,104)+blocks(sc.com,194);
+    var idle='';
+    for(i=0;i<sc.idle.length;i++){var idd=sc.idle[i],ix=X(idd[1]),iw=X(idd[2])-ix;
+      idle+='<rect x="'+ix.toFixed(1)+'" y="'+idd[0]+'" width="'+iw.toFixed(1)+'" height="34" rx="5" fill="none" stroke="#EA5A53" stroke-dasharray="4 4" stroke-opacity="0.7"/>'
+        +(iw>70?'<text x="'+(ix+iw/2).toFixed(1)+'" y="'+(idd[0]+21)+'" fill="#EA5A53" font-size="9.5" text-anchor="middle" font-family="JetBrains Mono,monospace">'+idd[3]+'</text>':'');}
+    var saved=(trMode==='ovl')?('<rect x="'+X(82).toFixed(1)+'" y="100" width="'+(X(100)-X(82)).toFixed(1)+'" height="132" rx="6" fill="rgba(70,184,204,0.06)" stroke="#46B8CC" stroke-dasharray="4 4" stroke-opacity="0.5"/><text x="'+((X(82)+X(100))/2).toFixed(1)+'" y="170" fill="#46B8CC" font-size="10" text-anchor="middle" font-family="JetBrains Mono,monospace">time saved</text>'):'';
+    var cap=(trMode==='seq')
+      ?'amber ticks: the CPU launching kernels asynchronously. Backward finishes, <b>then</b> gradients all-reduce — the compute stream sits idle while comm runs, and comm idles all of forward + backward.'
+      :'each layer&rsquo;s gradients all-reduce <b>while the next layer&rsquo;s backward computes</b> — comm hides behind compute. This overlap is the trick every parallelism scheme depends on.';
+    $('ov-trace').innerHTML=''
+      +'<div class="tm-total"><span>one data-parallel step, traced</span><span class="seg2"><button id="tr-seq" class="'+(trMode==='seq'?'on':'')+'">sequential</button><button id="tr-ovl" class="'+(trMode==='ovl'?'on':'')+'">overlapped</button></span></div>'
+      +'<div class="tr-wrap"><svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg">'
+      +s
+      +'<clipPath id="trclip"><rect id="tr-clipr" x="0" y="0" width="'+(reduce?W:trMX)+'" height="'+H+'"/></clipPath>'
+      +'<g clip-path="url(#trclip)">'+body+'</g>'
+      +idle+saved
+      +'<line id="tr-cursor" x1="'+trMX+'" y1="18" x2="'+trMX+'" y2="246" stroke="#DCE2EA" stroke-width="1.2" opacity="'+(reduce?0:0.85)+'"/>'
+      +'</svg></div>'
+      +'<div class="pf-cap">'+cap+'</div>';
+    var ts=$('tr-seq'),to=$('tr-ovl');
+    if(ts)ts.addEventListener('click',function(){trMode='seq';trT=0;renderTrace();});
+    if(to)to.addEventListener('click',function(){trMode='ovl';trT=0;renderTrace();});
+    trReady=true;
+  }
+  function trTick(dt){
+    if(!trReady)renderTrace();
+    if(reduce)return;
+    trT+=dt;var end=(trMode==='seq')?100:82,T=5.5,t=(trT*100/T)%(end+14);
+    var x=trMX+trPW*Math.min(t,end)/TR_TOT;
+    var cl=$('tr-clipr'),cu=$('tr-cursor');if(!cl)return;
+    cl.setAttribute('width',x);cu.setAttribute('x1',x);cu.setAttribute('x2',x);
+  }
+
+  /* ===== wiring ===== */
+  function renderCalc(){
+    var m=memory(),over=m.tot>m.cap,b=paramBreak(),c=$('calc'),tag=$('modetag');
+    if(state.mode==='tensor'){tag.textContent='the tensor';c.innerHTML='axes: x=H  y=S  z=B\nB=<b>'+state.B+'</b> S=<b>'+state.S+'</b> H=<b>'+state.h+'</b> × L=<b>'+state.L+'</b>\nelements ~ <b class="acc">'+fmt(state.B*state.S*state.h*state.L)+'</b>';}
+    else if(state.mode==='token'){tag.textContent='one token';c.innerHTML='one S, one B -> one token\nlength h = <b class="acc">'+state.h+'</b> · B·S = <b>'+fmt(state.B*state.S)+'</b> tokens';}
+    else if(state.mode==='layernorm'){tag.textContent='layernorm . along H';c.innerHTML='mu,var over all '+state.h+' dims (this token only)\nparams 2h = <b class="acc">'+fmt(2*state.h)+'</b>';}
+    else if(state.mode==='heads'){tag.textContent='heads . after LN';var dh=Math.round(state.h/state.nh);c.innerHTML='LN -> Q,K,V -> cut into heads\nh/'+state.nh+' = d_head <b class="acc">'+dh+'</b> -> <b class="c2">(B,S,'+state.nh+','+dh+')</b>';}
+    else if(state.mode==='params'){tag.textContent='parameter count';c.innerHTML='N = emb + L·(attn+mlp+norm) + head\ntotal = <b class="acc">'+unit(b.total)+'</b> ('+fmt(b.total)+')';renderParams();}
+    else if(state.mode==='activ'){tag.textContent='activation anatomy';c.innerHTML='saved on forward, consumed on backward\nper layer = s·b·h·(34 + 5·n_h·s/h)\nlinear in b, <b class="acc">quadratic in s</b>';renderActiv();}
+    else if(state.mode==='budget'){tag.textContent=over?'budget . OOM':'budget . fits';
+      var ms=(state.prec==='fp32')?'4+4+8':'2+2+8+4';
+      c.innerHTML='model state = '+ms+' = <b>16 B/param</b> (same either way)\nmixed shrinks activations (2B) + faster compute\ntotal <b>'+GB(m.tot)+'G</b> / <b>'+state.gpu+'G</b> -> '+(over?'<b class="bad">OOM</b>':'<b class="ok">fits</b>');renderTreemap();}
+    else if(state.mode==='step'){tag.textContent='one training step';c.innerHTML='forward caches activations -> backward makes gradients\ngradients = model size · optimizer = biggest block';}
+    else if(state.mode==='profile'){tag.textContent='memory · 4 steps';c.innerHTML='step 1 peak (no optim states yet) = <b>'+GB(m.tot-m.o)+'G</b>\nsteps ≥2 peak = <b class="acc">'+GB(m.tot)+'G</b> / '+state.gpu+'G -> '+(over?'<b class="bad">OOM</b>':'<b class="ok">fits</b>');}
+    else if(state.mode==='recomp'){tag.textContent='recompute';c.innerHTML='strategy: <b class="acc">'+state.recomp+'</b> · activations <b>'+GB(m.a)+'G</b>\ncompute ×<b>'+recompOverhead().toFixed(2)+'</b> · backward ≈ 2× forward';}
+    else if(state.mode==='accum'){tag.textContent='accumulate';c.innerHTML='gbs = mbs × N = '+m.micro+' × '+state.acc+' = '+(m.micro*state.acc)+'\nactivations follow <b class="acc">mbs='+m.micro+'</b> -> <b>'+GB(m.a)+'G</b>';}
+    else{tag.textContent='the trace';c.innerHTML='CPU launches kernels async, GPU runs them\ncompute + comm on separate CUDA streams\n<b class="acc">overlap</b> them — or the GPU idles';}
+  }
+  function renderAll(){if(is3D(state.mode))rebuild();renderCalc();if(state.mode==='params')renderParams();if(state.mode==='activ')renderActiv();if(state.mode==='budget')renderTreemap();
+    pfReady=false;acReady=false;if(state.mode==='recomp')renderRecomp();}
+  function onCtl(){
+    state.B=+$('B').value;state.S=+$('S').value;state.h=+$('h').value;state.L=+$('L').value;state.gpu=+$('gpu').value;
+    if($('nh'))state.nh=parseInt($('nh').value,10);
+    state.preset='custom';customCfg();
+    $('B-v').textContent=state.B;$('S-v').textContent=state.S;$('h-v').textContent=state.h;$('L-v').textContent=state.L;
+    $('p-gpt2').classList.remove('on');$('p-llama').classList.remove('on');renderAll();
+  }
+  ['B','S','h','L'].forEach(function(id){$(id).addEventListener('input',onCtl);});
+  $('gpu').addEventListener('change',function(){state.gpu=+$('gpu').value;renderAll();});
+  if($('nh'))$('nh').addEventListener('change',onCtl);
+  $('p-gpt2').addEventListener('click',function(){setPreset('gpt2');});
+  $('p-llama').addEventListener('click',function(){setPreset('llama');});
+
+  var steps=document.querySelectorAll('.step');
+  function setMode(m){if(state.mode===m)return;state.mode=m;if(m==='step')flowEls=null;
+    var ai=-1;for(var qi=0;qi<steps.length;qi++){if(steps[qi].getAttribute('data-mode')===m){ai=qi;break;}}
+    var at=$('acttag');if(at&&ai>=0)at.textContent='act '+('0'+(ai+1)).slice(-2)+' / '+steps.length;
+    if(m==='budget')tmAnim=true;
+    if(m==='profile'){pfT=0;renderProfile();}if(m==='accum'){acT=0;renderAccum();}if(m==='trace'){trT=0;renderTrace();}
+    applyMode();renderCalc();if(m==='params')renderParams();if(m==='activ')renderActiv();if(m==='budget')renderTreemap();if(m==='recomp')renderRecomp();}
+  if('IntersectionObserver' in window){
+    var mq=window.matchMedia('(max-width:820px)');
+    var io=null;
+    function buildIO(){
+      if(io)io.disconnect();
+      var rm=mq.matches?'-60% 0px -18% 0px':'-45% 0px -45% 0px';
+      io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){steps.forEach(function(s){s.classList.remove('active');});e.target.classList.add('active');setMode(e.target.getAttribute('data-mode'));}});},{rootMargin:rm,threshold:0});
+      steps.forEach(function(s){io.observe(s);});
+    }
+    buildIO();
+    if(mq.addEventListener)mq.addEventListener('change',buildIO);
+  }else{steps.forEach(function(s){s.classList.add('active');});}
+
+  var pbar=$('progress'),pBusy=false;
+  if(pbar)window.addEventListener('scroll',function(){if(pBusy)return;pBusy=true;
+    requestAnimationFrame(function(){pBusy=false;var d=document.documentElement,
+      h=d.scrollHeight-d.clientHeight,p=h>0?d.scrollTop/h:0;pbar.style.width=(p*100).toFixed(2)+'%';});
+  },{passive:true});
+
+  customCfg();syncSliders();steps[0].classList.add('active');initThree();renderCalc();
+})();
+</script>
+</body>
+</html>
